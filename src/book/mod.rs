@@ -427,6 +427,28 @@ impl MDBook {
             .unwrap_or_default()
             .theme_dir(&self.root)
     }
+
+    /// Get the directories that should be served.
+    pub fn serve_dirs(&self) -> Vec<(String, PathBuf)> {
+        self.renderers
+            .iter()
+            .filter_map(|renderer| {
+                let name = renderer.name();
+                let key = format!("output.{}.serve", name);
+
+                let serve = self
+                    .config
+                    .get(&key)
+                    .and_then(Value::as_bool)
+                    .unwrap_or(name == "html");
+
+                match serve {
+                    true => Some((name.to_string(), self.build_dir_for(name))),
+                    false => None,
+                }
+            })
+            .collect()
+    }
 }
 
 /// Look at the `Config` and try to figure out what renderers to use.

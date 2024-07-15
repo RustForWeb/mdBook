@@ -73,7 +73,7 @@ pub fn execute(args: &ArgMatches) -> Result<()> {
         .to_socket_addrs()?
         .next()
         .ok_or_else(|| anyhow::anyhow!("no address found for {}", address))?;
-    let build_dir = book.build_dir_for("html");
+    let serve_dirs = book.serve_dirs();
     let input_404 = book
         .config
         .get("output.html.input-404")
@@ -85,8 +85,8 @@ pub fn execute(args: &ArgMatches) -> Result<()> {
     let (tx, _rx) = tokio::sync::broadcast::channel::<Message>(100);
 
     let reload_tx = tx.clone();
-    let thread_handle = std::thread::spawn(move || {
-        serve(build_dir, sockaddr, reload_tx, &file_404);
+    let thread_handle: std::thread::JoinHandle<()> = std::thread::spawn(move || {
+        serve(serve_dirs, sockaddr, reload_tx, &file_404);
     });
 
     let serving_url = format!("http://{address}");
@@ -111,7 +111,7 @@ pub fn execute(args: &ArgMatches) -> Result<()> {
 
 #[tokio::main]
 async fn serve(
-    build_dir: PathBuf,
+    dirs: Vec<(String, PathBuf)>,
     address: SocketAddr,
     reload_tx: broadcast::Sender<Message>,
     file_404: &str,
@@ -136,12 +136,24 @@ async fn serve(
                 }
             })
         });
-    // A warp Filter that serves from the filesystem.
-    let book_route = warp::fs::dir(build_dir.clone());
+
     // The fallback route for 404 errors
-    let fallback_route = warp::fs::file(build_dir.join(file_404))
-        .map(|reply| warp::reply::with_status(reply, warp::http::StatusCode::NOT_FOUND));
-    let routes = livereload.or(book_route).or(fallback_route);
+    let fallback_route = dirs.iter().find_map(|(name, dir)| {
+        (name == "html").then_some(
+            warp::fs::file(dir.join(file_404))
+                .map(|reply| warp::reply::with_status(reply, warp::http::StatusCode::NOT_FOUND)),
+        )
+    });
+
+    // The routes that serve from the filesystem
+    let dir_routes = dirs
+        .iter()
+        .map(|(_, dir)| warp::fs::dir(dir.clone()).boxed())
+        .reduce(|acc, route| acc.or(route).unify().boxed())
+        .and_then(|route| fallback_route.map(|fallback_route| route.or(fallback_route)));
+
+    let routes = livereload
+        .or(dir_routes.expect("At least one renderer needs to have the `serve` flag enabled."));
 
     std::panic::set_hook(Box::new(move |panic_info| {
         // exit if serve panics
